@@ -63,7 +63,7 @@ log "Generating CA certs"
 # We'll use this root certificate to signt server and client certificates.
 #
 # This cone command creates private key and self-signed x509 certificate
-openssl req -newkey rsa:2048 -new -x509 -extensions v3_ca -days 9999 -nodes -out $CA_CRT -keyout $CA_KEY -subj "$CA_SUBJ"
+openssl req -new -x509 -extensions v3_ca -days 9999 -nodes -out $CA_CRT -keyout $CA_KEY -subj "$CA_SUBJ"
 # Concatenate the private key and the certificate into a pem file which will be used by mongod and mongo.
 cat $CA_KEY $CA_CRT > $CA_PEM
 
@@ -73,11 +73,11 @@ cat $CA_KEY $CA_CRT > $CA_PEM
 
 log "Generating server certs"
 # Create server private key and CSR (certificate signing request).
-openssl req -new -nodes -newkey rsa:2048 -keyout $SRV_KEY -out $SRV_CSR -subj "$SRV_SUBJ"
+openssl req -new -nodes -keyout $SRV_KEY -out $SRV_CSR -subj "$SRV_SUBJ"
 # Now we have server private key (.key) and server certificate signing request (.csr).
 # Use CA.key and CA.crt to sign  the server .csr file. This command will also generate a serial file (.srl)
 # This is a file with a random number which is incremented each time CA.crt is used to sign something.
-openssl x509 -CA $CA_CRT -CAkey $CA_KEY -CAcreateserial -req -days 9999 -in $SRV_CSR -out $SRV_CRT
+openssl x509 -sha256 -CA $CA_CRT -CAkey $CA_KEY -CAcreateserial -req -days 9999 -in $SRV_CSR -out $SRV_CRT -extfile <(printf "subjectAltName=DNS:$SRV_SUBJ_CN")
 # Concatentate the server private key and certificate into a pem file which will be used by mongod.
 cat $SRV_KEY $SRV_CRT > $SRV_PEM
 # Remove server .csr file, we won't need it anymore.
@@ -86,9 +86,9 @@ rm $SRV_CSR
 # Now we have server private key (.key), x509 certificate (.crt) and pem file.
 
 log "Generating client certs"
-# Now generate client files the same way.
-openssl req -new -nodes -newkey rsa:2048 -keyout $CLIENT_KEY -out $CLIENT_CSR -subj "$CLIENT_SUBJ"
-openssl x509 -CA $CA_CRT -CAkey $CA_KEY -CAcreateserial -req -days 9999 -in $CLIENT_CSR -out $CLIENT_CRT
+# Now generate client files the same way. -extensions SAN -config <(cat /etc/ssl/openssl.cnf <(printf "[SAN]\nsubjectAltName='DNS:$SRV_SUBJ_CN'"))
+openssl req -new -nodes -keyout $CLIENT_KEY -out $CLIENT_CSR -subj "$CLIENT_SUBJ" 
+openssl x509 -sha256 -CA $CA_CRT -CAkey $CA_KEY -CAcreateserial -req -days 9999 -in $CLIENT_CSR -out $CLIENT_CRT -extfile <(printf "subjectAltName=DNS:$SRV_SUBJ_CN")
 # Create pem file to be used by mongo.
 cat $CLIENT_KEY $CLIENT_CRT > $CLIENT_PEM
 rm $CLIENT_CSR
@@ -97,29 +97,13 @@ rm $CLIENT_CSR
 
 # At this point the files can be used by the mongod and mongo.
 # $ mongod --sslMode requireSSL --sslPEMKeyFile server.pem --sslCAFile CA.pem --auth --clusterAuthMode x509
-# $ mongo admin --authenticationDatabase '$external' --ssl --sslPEMKeyFile mongodb-client.pem --sslCAFile mongodb-CA.pem --authenticationMechanism MONGODB-X509 -u "C=US,ST=CA,L=San Francisco,O=Jaspersoft,OU=JSDev,CN=admin"
-# Note the reverse order of elements in the subj (I don't know why).
+# $mongo mongo-x509:27017/admin --ssl --sslPEMKeyFile /etc/ssl/mongodb-client.pem  --sslCAFile /etc/ssl/mongodb-CA.pem --authenticationDatabase '$external' --authenticationMechanism MONGODB-X509 --username "C=US,ST=CA,L=San Francisco,O=Jaspersoft,OU=JSDev,CN=admin"
 
-# Now for the java client we need to create trust-store.jks with CA.crt in it and key-store.jks with client.key and client.crt in it.
-
-log "Creating jks store"
-# remove JKS store from previous run
-rm -f $CLIENT_JKS
-# Create intermediate PKCS12 type store with client cert and key (I couldn't find another way to import client cert and key into JKS store).
-openssl pkcs12 -export -in $CLIENT_CRT -inkey $CLIENT_KEY -chain -CAfile $CA_PEM -out $CLIENT_P12 -password pass:123456
-# create JKS type key store with client cert and key
-keytool -importkeystore -deststorepass '123456' -srcstorepass '123456' -destkeystore $CLIENT_JKS -srckeystore $CLIENT_P12 -srcstoretype PKCS12
-# Won't need the .p12 file anymore.
-rm $CLIENT_P12
-# Create JKS type trust store with CA cert in it.
-keytool -importcert -trustcacerts -noprompt -file $CA_CRT -keystore $CLIENT_JKS -storepass '123456'
-# Won't need these eighter.
-rm $CA_KEY $CA_CRT $SRV_KEY $SRV_CRT $CLIENT_KEY $CLIENT_CRT $CA_SRL
 
 echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 echo "Created:"
 echo "CA PEM file with the private key and self-signed certificate in it: $CA_PEM"
 echo "Server PEM file with the private key and certificate signed by CA: $SRV_PEM"
 echo "Client PEM file with the private key and certificate signed by CA: $CLIENT_PEM"
-echo "Client JKS type key store with client private key/certificate and CA certifcate in it (password: 123456): $CLIENT_JKS"
+
 echo "Done!"

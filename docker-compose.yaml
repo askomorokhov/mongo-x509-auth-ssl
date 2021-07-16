@@ -1,0 +1,68 @@
+---
+    version: "3"
+    services:
+    
+      pmm-server:
+        container_name: pmm-server
+        image: perconalab/pmm-server-fb:PR-1906-54bd957
+        # image: percona/pmm-server
+        ports:
+          - 80:80
+          - 443:443
+        restart: always
+
+      pmm-client-bin:
+        container_name: pmm-client
+        image: centos
+        depends_on:
+          - pmm-server
+          - mongo-x509
+        command: >
+          bash -c "
+            echo '[mongodb-org-4.4]
+            name=MongoDB Repository
+            baseurl=https://repo.mongodb.org/yum/amazon/2/mongodb-org/4.4/x86_64/
+            gpgcheck=1
+            enabled=1
+            gpgkey=https://www.mongodb.org/static/pgp/server-4.4.asc
+            ' > /etc/yum.repos.d/mongodb-org-4.4.repo;
+            sed -i -r 's/^ +//g' /etc/yum.repos.d/mongodb-org-4.4.repo
+            yum install -y wget mongodb-org
+            wget -O pmm2-client.tar.gz https://s3.us-east-2.amazonaws.com/pmm-build-cache/PR-BUILDS/pmm2-client/pmm2-client-PR-1906-54bd957.tar.gz
+            tar xfz pmm2-client.tar.gz && cd pmm2-client-2.20.0
+            ./install_tarball
+            export PATH=$PATH:/usr/local/percona/pmm2/bin
+            sleep 60
+            pmm-admin config --server-url=https://admin:admin@pmm-server:443 --server-insecure-tls 
+            pmm-agent setup --config-file=/usr/local/percona/pmm2/config/pmm-agent.yaml --server-address=pmm-server:443 --server-insecure-tls --server-username=admin --server-password=admin
+            sleep 30
+            nohup pmm-agent --config-file=/usr/local/percona/pmm2/config/pmm-agent.yaml &
+            sleep 60
+            # copy *.pem
+            # docker cp mongo-x509:/etc/ssl/mongodb-CA.pem mongodb-CA.pem
+            # docker cp mongo-x509:/etc/ssl/mongodb-client.pem mongodb-client.pem
+
+            # docker cp mongodb-client.pem pmm-client:/etc/ssl/mongodb-client.pem
+            # docker cp mongodb-CA.pem pmm-client:/etc/ssl/mongodb-CA.pem
+            # config mongo for monitoring
+            # mongo mongo-x509:27017/admin --ssl  --sslPEMKeyFile /etc/ssl/mongodb-client.pem  --sslCAFile /etc/ssl/mongodb-CA.pem  --authenticationDatabase '$external' --authenticationMechanism MONGODB-X509 --username "C=US,ST=CA,L=San Francisco,O=Jaspersoft,OU=JSDev,CN=admin"
+            # start monitor mongo
+            pmm-admin add mongodb --tls --tls-certificate-key-file=/etc/ssl/mongodb-client.pem --tls-ca-file=/etc/ssl/mongodb-CA.pem --authentication-mechanism='MONGODB-X509' --authentication-database='$external' --host=mongo-x509  MyMongoX509
+            tail -f /dev/null
+          "
+        volumes:
+          - logs-directory:/var/log/mysql
+
+      mongo-x509:
+        image: docker.io/library/mongo-x509
+        container_name : "mongo-x509"
+        ports:
+          - '27017:27017'
+    
+    volumes:
+      logs-directory:
+        driver_opts:
+          type: volume
+          device: ${PWD}/logs
+          o: bind
+    
